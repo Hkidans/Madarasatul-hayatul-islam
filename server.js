@@ -165,8 +165,9 @@ if(!existingAdmin){
 }
 
 app.use(helmet({contentSecurityPolicy:false}));
-app.use(express.json({limit:"4mb"}));
+app.use(express.json({limit:"8mb"}));
 app.use(express.urlencoded({extended:true}));
+app.use((err,req,res,next)=>{if(err?.type==="entity.too.large")return res.status(413).json({error:"The uploaded photo is too large. Please choose a smaller photo."});next(err);});
 app.use(session({
   secret:process.env.SESSION_SECRET||crypto.randomBytes(32).toString("hex"),
   resave:false,saveUninitialized:false,
@@ -211,7 +212,7 @@ Registered: ${s.created_at}`);}catch(e){console.error(e.message)}
 });
 
 app.post("/api/student/login",limiter,(req,res)=>{
-  const reg=clean(req.body.registrationNumber,60),pass=clean(req.body.password,150);
+  const reg=clean(req.body.registrationNumber,60).toUpperCase(),pass=String(req.body.password||"").trim();
   const s=db.prepare("SELECT * FROM students WHERE registration_number=? AND status='Approved'").get(reg);
   if(!s||pass!==generalPassword)return res.status(401).json({error:"Invalid Registration Number or General Password."});
   req.session.studentId=s.id;res.json({ok:true});
@@ -226,7 +227,7 @@ app.get("/api/student/me",student,(req,res)=>{
 app.post("/api/student/logout",(req,res)=>req.session.destroy(()=>res.json({ok:true})));
 
 app.post("/api/admin/login",limiter,(req,res)=>{
-  const email=clean(req.body.email,150),pass=String(req.body.password||"");
+  const email=clean(req.body.email,150).toLowerCase(),pass=String(req.body.password||"");
   const a=db.prepare("SELECT * FROM admins WHERE email=?").get(email);
   if(!a||!bcrypt.compareSync(pass,a.password_hash))return res.status(401).json({error:"Invalid admin username or password."});
   req.session.adminId=a.id;res.json({ok:true});
