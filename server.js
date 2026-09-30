@@ -134,8 +134,9 @@ function grade(total){
 function admin(req,res,next){if(!req.session.adminId)return res.status(401).json({error:"Admin login required"});next();}
 function student(req,res,next){if(!req.session.studentId)return res.status(401).json({error:"Student login required"});next();}
 function teacher(req,res,next){if(!req.session.teacherId)return res.status(401).json({error:"Staff login required"});const t=db.prepare("SELECT * FROM teachers WHERE id=? AND active=1").get(req.session.teacherId);if(!t)return res.status(401).json({error:"Staff account is inactive."});req.teacherAccount=t;next();}
+function registrationAccess(req,res,next){if(req.session.adminId){req.registrationActor='admin';return next();}if(req.session.teacherId){const t=db.prepare("SELECT * FROM teachers WHERE id=? AND active=1").get(req.session.teacherId);if(t && teacherCan(t,'Registration Officer')){req.teacherAccount=t;req.registrationActor='registration_officer';return next();}}return res.status(403).json({error:'Only Admin or a Registration Officer can register students.'});}
 function teacherClasses(t){try{return JSON.parse(t.class_ids||'[]').map(Number).filter(Boolean)}catch{return []}}
-function teacherCan(t,role){const r=String(t.role||'Teacher').toLowerCase();return r==='admin' || r===role.toLowerCase() || (role==='Teacher' && r==='teacher') || (role==='Exam Officer' && r==='exam officer') || (role==='Bursar' && r==='bursar');}
+function teacherCan(t,role){const r=String(t.role||'Teacher').toLowerCase();return r==='admin' || r===role.toLowerCase() || (role==='Teacher' && r==='teacher') || (role==='Exam Officer' && r==='exam officer') || (role==='Bursar' && r==='bursar') || (role==='Registration Officer' && r==='registration officer');}
 function teacherClassAllowed(t,classId){return teacherClasses(t).includes(Number(classId));}
 function teacherStudentAllowed(t,studentId){const s=db.prepare("SELECT class_id FROM students WHERE id=?").get(Number(studentId));return !!s && teacherClassAllowed(t,s.class_id);}
 function roleOrClass(t,role,classId){return teacherCan(t,role) && teacherClassAllowed(t,classId);}
@@ -180,7 +181,7 @@ app.get("/api/public/classes",(req,res)=>res.json(db.prepare("SELECT * FROM clas
 
 app.get("/api/public/settings",(req,res)=>res.json({registrationOpen:settingGet("registration_open","1")==="1",registrationSession:settingGet("registration_session",defaultAcademicSession())}));
 
-app.post("/api/admission",async(req,res)=>{
+app.post("/api/admission",registrationAccess,async(req,res)=>{
   if(settingGet("registration_open","1")!=="1")return res.status(403).json({error:"Online student registration is currently closed by the Admin."});
   const f={
     fullName:clean(req.body.fullName,120),gender:clean(req.body.gender,20),dob:clean(req.body.dob,30),
@@ -194,7 +195,7 @@ app.post("/api/admission",async(req,res)=>{
   const n=nextNumbers(cat,session);
   db.prepare(`INSERT INTO students(full_name,gender,dob,guardian_name,phone,address,class_id,
     registration_number,admission_number,entry_session,status,created_at,photo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(f.fullName,f.gender,f.dob,f.guardianName,f.phone,f.address,f.classId,n.registrationNumber,n.admissionNumber,session,"Pending",now(),f.photo);
+    .run(f.fullName,f.gender,f.dob,f.guardianName,f.phone,f.address,f.classId,n.registrationNumber,n.admissionNumber,session,"Approved",now(),f.photo);
   const s=db.prepare("SELECT * FROM students WHERE registration_number=?").get(n.registrationNumber);
   try{await mail(`New Student Registration - ${s.admission_number}`,
 `MADARASATUL HAYATUL ISLAM KIDANDAN
@@ -268,6 +269,19 @@ app.post("/api/admin/students",admin,(req,res)=>{
   n.registrationNumber,n.admissionNumber,session,clean(req.body.status,20)||"Approved",now());
   res.json({ok:true,registrationNumber:n.registrationNumber,admissionNumber:n.admissionNumber});
 });
+app.post("/api/teacher/registration",teacher,(req,res)=>{
+  if(!teacherCan(req.teacherAccount,"Registration Officer"))return res.status(403).json({error:"Only a Registration Officer can register students."});
+  const classId=Number(req.body.classId)||null;
+  const c=db.prepare("SELECT id,category FROM classes WHERE id=? AND category IN ('Islamiyya','Hifz','Academy')").get(classId);
+  if(!c)return res.status(400).json({error:"Please select a valid class / level."});
+  const fullName=clean(req.body.fullName,120),guardianName=clean(req.body.guardianName,120),phone=clean(req.body.phone,40);
+  if(!fullName||!guardianName||!phone)return res.status(400).json({error:"Full name, parent/guardian name and phone are required."});
+  const sessionValue=settingGet("registration_session",defaultAcademicSession());
+  const n=nextNumbers(c.category,sessionValue);
+  db.prepare(`INSERT INTO students(full_name,gender,dob,guardian_name,phone,address,class_id,registration_number,admission_number,entry_session,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(fullName,clean(req.body.gender,20),clean(req.body.dob,30),guardianName,phone,clean(req.body.address,300),classId,n.registrationNumber,n.admissionNumber,sessionValue,"Approved",now());
+  res.json({ok:true,student:{fullName,registrationNumber:n.registrationNumber,admissionNumber:n.admissionNumber,entrySession:sessionValue,className:c.id,programme:c.category,status:"Approved"},generalPassword});
+});
 app.patch("/api/admin/students/:id/status",admin,(req,res)=>{
   const status=clean(req.body.status,20);
   if(!["Pending","Approved","Rejected","Inactive"].includes(status))return res.status(400).json({error:"Invalid status."});
@@ -300,7 +314,7 @@ app.patch("/api/admin/settings/session",admin,(req,res)=>{const session=clean(re
 app.get("/api/admin/teachers",admin,(req,res)=>res.json(db.prepare("SELECT id,full_name,phone,subject,address,username,role,class_ids,active,created_at FROM teachers ORDER BY id DESC").all().map(t=>({...t,class_ids:teacherClasses(t)}))));
 app.post("/api/admin/teachers",admin,(req,res)=>{
   const fullName=clean(req.body.fullName,120),username=clean(req.body.username,80),password=String(req.body.password||"");
-  const role=["Teacher","Exam Officer","Bursar"].includes(req.body.role)?req.body.role:"Teacher";
+  const role=["Teacher","Exam Officer","Bursar","Registration Officer"].includes(req.body.role)?req.body.role:"Teacher";
   const classIds=Array.isArray(req.body.classIds)?req.body.classIds.map(Number).filter(Boolean):[];
   if(!fullName||!username||password.length<8)return res.status(400).json({error:"Full name, username and a password of at least 8 characters are required."});
   try{db.prepare("INSERT INTO teachers(full_name,phone,subject,address,username,password_hash,role,class_ids,active,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)").run(fullName,clean(req.body.phone,40),clean(req.body.subject,100),clean(req.body.address,300),username,bcrypt.hashSync(password,12),role,JSON.stringify(classIds),now());res.json({ok:true});}
@@ -308,7 +322,7 @@ app.post("/api/admin/teachers",admin,(req,res)=>{
 });
 app.patch("/api/admin/teachers/:id",admin,(req,res)=>{
   const id=Number(req.params.id),t=db.prepare("SELECT * FROM teachers WHERE id=?").get(id);if(!t)return res.status(404).json({error:"Staff account not found."});
-  const role=["Teacher","Exam Officer","Bursar"].includes(req.body.role)?req.body.role:t.role;const classIds=Array.isArray(req.body.classIds)?req.body.classIds.map(Number).filter(Boolean):teacherClasses(t);
+  const role=["Teacher","Exam Officer","Bursar","Registration Officer"].includes(req.body.role)?req.body.role:t.role;const classIds=Array.isArray(req.body.classIds)?req.body.classIds.map(Number).filter(Boolean):teacherClasses(t);
   const password=String(req.body.password||"");
   if(password) db.prepare("UPDATE teachers SET role=?,class_ids=?,active=?,password_hash=? WHERE id=?").run(role,JSON.stringify(classIds),req.body.active===false?0:1,bcrypt.hashSync(password,12),id);
   else db.prepare("UPDATE teachers SET role=?,class_ids=?,active=? WHERE id=?").run(role,JSON.stringify(classIds),req.body.active===false?0:1,id);
